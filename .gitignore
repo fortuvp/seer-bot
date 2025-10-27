@@ -1,0 +1,21 @@
+# Environment files
+.env
+.env.*
+
+# Python artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Tooling caches
+*.log
+*.cache/
+
+# Runtime state
+state.json
