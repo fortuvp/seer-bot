@@ -56,6 +56,16 @@ python3 bot.py
 ```
 Logs stream to stdout. The watcher creates/updates `state.json` with the last processed block so restarts avoid re-sending older events.
 
+Using `just` (requires `just` installed):
+```bash
+just rebuild
+just restart
+```
+
+Defaults: `IMAGE=seer-bot`, `CONTAINER=seer-bot`, `ENV_FILE=.env`.
+
+Override defaults inline, e.g.: `ENV_FILE=/abs/path/to/.env IMAGE=my-image CONTAINER=my-container just rebuild`.
+
 ## Operational Notes
 - Notifications are sent only for `NewItem` and `RequestSubmitted` events and include Seer + Curate deep links using the on-chain item ID.
 - Transaction hashes are deduplicated in-memory per process; restarting clears the seen set.
