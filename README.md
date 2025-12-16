@@ -37,7 +37,8 @@ Environment variables are read via `python-dotenv`:
 
 - `TELEGRAM_BOT_TOKEN` (required) – Bot token from BotFather.
 - `TELEGRAM_CHAT_ID` (required) – Destination chat or channel id, e.g. `YOUR_TELEGRAM_CHAT_ID`.
-- `GNOSIS_RPC_URL` – HTTPS endpoint for Gnosis RPC (defaults to `https://rpc.gnosischain.com`).
+- `SUBGRAPH_URL`(required) – GraphQL endpoint (e.g., Envio/Hyperindex) to resolve the market address by itemID when it isn’t available from IPFS
+- `GNOSIS_RPC_URL` (required)– HTTPS endpoint for Gnosis RPC (defaults to `https://rpc.gnosischain.com`).
 - `CONFIRMATIONS` – Minimum confirmations to wait before notifying (default `3`).
 - `POLL_INTERVAL` – Sleep duration between polling rounds in seconds (default `15`).
 - `BATCH_SIZE` – Block span per `eth_getLogs` request (default `200`).
@@ -46,7 +47,7 @@ Environment variables are read via `python-dotenv`:
 - `EXPLORER_TX_URL` – Base URL used for transaction links (default GnosisScan).
 - `IPFS_GATEWAY` – Gateway base URL used to fetch IPFS metadata (default `https://ipfs.io`).
 - `IPFS_TIMEOUT` – Timeout in seconds for IPFS HTTP fetches (default `20`).
-- `SUBGRAPH_URL` – GraphQL endpoint (e.g., Envio/Hyperindex) to resolve the market address by itemID when it isn’t available from IPFS
+
 
 You can override any variable inline when launching, e.g.:
 ```bash
