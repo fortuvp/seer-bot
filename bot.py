@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+import html
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Set
@@ -34,6 +35,9 @@ STATE_FILE = Path("state.json")
 ABI_FILE = Path("abi.json")
 REGISTRY_ADDRESS = "0x5aaf9e23a11440f8c1ad6d2e2e5109c7e52cc672"
 EXPLORER_TX_URL = os.getenv("EXPLORER_TX_URL", "https://gnosisscan.io/tx/")
+IPFS_GATEWAY = os.getenv("IPFS_GATEWAY", "https://ipfs.io")
+IPFS_TIMEOUT = int(os.getenv("IPFS_TIMEOUT", "20"))
+SUBGRAPH_URL = os.getenv("SUBGRAPH_URL")
 
 
 @dataclass
@@ -46,6 +50,12 @@ class Settings:
     batch_size: int
     registry_address: str
     start_block: int | None
+
+
+@dataclass
+class MarketDetails:
+    address: str | None
+    name: str | None
 
 
 def load_settings() -> Settings:
@@ -334,7 +344,12 @@ def extract_item_id(args: Dict[str, Any]) -> str | None:
 
 
 def build_notification_message(
-    event_name: str | None, args: Any, contract_address: str
+    event_name: str | None,
+    args: Any,
+    contract_address: str,
+    *,
+    market_address_override: str | None = None,
+    market_name: str | None = None,
 ) -> str | None:
     if event_name not in {"NewItem", "RequestSubmitted"}:
         return None
@@ -343,14 +358,187 @@ def build_notification_message(
     if not item_id:
         logging.warning("Skipping notification; could not extract item ID.")
         return None
+    target_id = market_address_override or item_id
+    display_name = market_name or target_id
     checksum_contract = Web3.to_checksum_address(contract_address)
-    seer_url = f"https://app.seer.pm/markets/100/{item_id}"
+    seer_url = f"https://app.seer.pm/markets/100/{target_id}"
     curate_url = f"https://curate.kleros.io/tcr/100/{checksum_contract}/{item_id}"
     return (
-        "A new market has been submitted for verification.\n"
-        f'Seer: <a href="{seer_url}">check here</a>\n'
-        f'Curate: <a href="{curate_url}">check here</a>'
+        "<b>🔵🔵 NEW VERIFICATION REQUEST 🔵🔵</b>\n\n"
+        "A new market has been submitted for verification.\n\n"
+        f"Market: <b>{html.escape(display_name)}</b>\n\n"
+        f'Seer: <a href="{seer_url}">Interact with the Market</a>\n'
+        f'Curate: <a href="{curate_url}">Check Market Compliance</a>\n\n'
+        "<i>💰Each market verification request comes with a $100 bounty. "
+        "Spot a case of non-compliance, submit a challenge, and if you win, the bounty is yours.💰</i>"
     )
+
+
+def build_dispute_message(
+    item_id: str, contract_address: str, market_details: MarketDetails
+) -> str:
+    display_name = market_details.name or item_id
+    checksum_contract = Web3.to_checksum_address(contract_address)
+    curate_url = f"https://curate.kleros.io/tcr/100/{checksum_contract}/{item_id}"
+    seer_line = ""
+    if market_details.address:
+        seer_url = f"https://app.seer.pm/markets/100/{market_details.address}"
+        seer_line = f'Seer: <a href="{seer_url}">Interact with the Market</a>\n'
+    return (
+        "<b>❗️❗️ DISPUTED MARKET ❗️❗️</b>\n\n"
+        "A market has been challenged.\n\n"
+        f"Market: <b>{html.escape(display_name)}</b>\n\n"
+        f"{seer_line}"
+        f'Curate: <a href="{curate_url}">Follow the Dispute</a>'
+    )
+
+
+def build_ipfs_url(ipfs_path: str, gateway: str = IPFS_GATEWAY) -> str | None:
+    path = ipfs_path.strip()
+    if not path:
+        return None
+    if path.startswith("ipfs://"):
+        path = path[len("ipfs://") :]
+    if path.startswith("/ipfs/"):
+        path = path[len("/ipfs/") :]
+    if path.startswith("/"):
+        path = path[1:]
+    if not path:
+        return None
+    return f"{gateway.rstrip('/')}/ipfs/{path}"
+
+
+def fetch_ipfs_json(ipfs_path: str) -> Dict[str, Any] | None:
+    url = build_ipfs_url(ipfs_path)
+    if not url:
+        logging.warning("IPFS path %s could not be normalized", ipfs_path)
+        return None
+    try:
+        response = requests.get(url, timeout=IPFS_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Failed to fetch IPFS content at %s: %s", url, exc)
+        return None
+    if not response.ok:
+        logging.warning(
+            "IPFS gateway returned %s for %s: %s",
+            response.status_code,
+            url,
+            response.text,
+        )
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        logging.warning("IPFS content at %s is not valid JSON", url)
+        return None
+
+
+MARKET_NAME_ABI = [
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "marketName",
+        "outputs": [{"name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+
+def fetch_market_details(ipfs_path: str, w3: Web3) -> MarketDetails:
+    details = MarketDetails(address=None, name=None)
+    payload = fetch_ipfs_json(ipfs_path)
+    if payload is None:
+        return details
+
+    def find_market_address(data: Dict[str, Any]) -> str | None:
+        candidates = []
+        for key in ("address", "market", "Market"):
+            if key in data:
+                candidates.append(data[key])
+        values = data.get("values") or {}
+        if isinstance(values, dict):
+            for key in ("address", "market", "Market"):
+                if key in values:
+                    candidates.append(values[key])
+        for candidate in candidates:
+            checksum = try_checksum_address(candidate)
+            if checksum:
+                return checksum
+        return None
+
+    checksum_address = find_market_address(payload)
+    if checksum_address:
+        details.address = checksum_address
+    else:
+        logging.warning("No valid market address found in IPFS payload for %s", ipfs_path)
+
+    if details.address:
+        try:
+            contract = w3.eth.contract(address=details.address, abi=MARKET_NAME_ABI)
+            details.name = contract.functions.marketName().call()
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "Could not fetch marketName from %s: %s",
+                details.address,
+                exc,
+            )
+
+    cache[ipfs_path] = details
+    return details
+
+
+def fetch_market_name(address: str, w3: Web3) -> str | None:
+    try:
+        contract = w3.eth.contract(address=address, abi=MARKET_NAME_ABI)
+        return contract.functions.marketName().call()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Could not fetch marketName from %s: %s", address, exc)
+        return None
+
+
+def fetch_market_from_subgraph(
+    item_id: str, registry_address: str
+) -> MarketDetails:
+    if not SUBGRAPH_URL:
+        return MarketDetails(address=None, name=None)
+    query = """
+    query ($registry: String!, $item: String!) {
+      LItem(
+        where: {
+          registryAddress: { _eq: $registry }
+          itemID: { _eq: $item }
+        }
+        limit: 1
+      ) {
+        key0
+      }
+    }
+    """
+    payload = {
+        "query": query,
+        "variables": {
+            "registry": registry_address.lower(),
+            "item": item_id.lower(),
+        },
+    }
+    try:
+        response = requests.post(SUBGRAPH_URL, json=payload, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Subgraph request failed: %s", exc)
+        return MarketDetails(address=None, name=None)
+    try:
+        items = data.get("data", {}).get("LItem", [])
+        if items:
+            addr = items[0].get("key0")
+            checksum = try_checksum_address(addr)
+            if checksum:
+                return MarketDetails(address=checksum, name=None)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Unexpected subgraph payload: %s", exc)
+    return MarketDetails(address=None, name=None)
 
 
 def run() -> None:
@@ -373,6 +561,8 @@ def run() -> None:
     )
 
     seen_transactions: Set[str] = set()
+    evidence_item_map: Dict[str, str] = {}
+    tx_item_map: Dict[str, str] = {}
 
     while True:
         latest_block = contract.web3.eth.block_number
@@ -402,6 +592,29 @@ def run() -> None:
                         else "<unknown>"
                     )
                     args_dict = ensure_args_dict(event.get("args", {}))
+                    ipfs_path = args_dict.get("_data") or args_dict.get("data")
+                    market_details = (
+                        fetch_market_details(str(ipfs_path), contract.web3)
+                        if ipfs_path is not None
+                        else MarketDetails(address=None, name=None)
+                    )
+                    item_id = extract_item_id(args_dict) if args_dict else None
+                    if item_id and tx_hash != "<unknown>":
+                        tx_item_map[tx_hash] = item_id
+                    if item_id:
+                        if not market_details.address and SUBGRAPH_URL:
+                            subgraph_details = fetch_market_from_subgraph(
+                                item_id, contract.address
+                            )
+                            if subgraph_details.address:
+                                if not subgraph_details.name:
+                                    subgraph_details.name = fetch_market_name(
+                                        subgraph_details.address, contract.web3
+                                    )
+                                market_details = subgraph_details
+                        evidence_group = args_dict.get("_evidenceGroupID")
+                        if evidence_group is not None:
+                            evidence_item_map[str(evidence_group)] = item_id
                     formatted_args = {
                         key: normalise_value(val) for key, val in args_dict.items()
                     }
@@ -414,20 +627,50 @@ def run() -> None:
                         formatted_args,
                     )
 
-                    if event.get("event") not in {"NewItem", "RequestSubmitted"}:
+                    if event.get("event") not in {"NewItem", "RequestSubmitted", "Dispute"}:
                         continue
 
-                    if tx_hash != "<unknown>" and tx_hash in seen_transactions:
+                    if event.get("event") != "Dispute" and tx_hash != "<unknown>" and tx_hash in seen_transactions:
                         logging.info(
                             "Skipping duplicate notification for tx=%s", tx_hash
                         )
                         continue
 
-                    message = build_notification_message(
-                        event.get("event"),
-                        args_dict,
-                        contract.address,
-                    )
+                    message: str | None
+                    if event.get("event") == "Dispute":
+                        evidence_group = args_dict.get("_evidenceGroupID")
+                        linked_item = evidence_item_map.get(str(evidence_group)) or tx_item_map.get(tx_hash)
+                        linked_details = MarketDetails(None, None)
+                        if linked_item:
+                            subgraph_details = fetch_market_from_subgraph(
+                                linked_item, contract.address
+                            )
+                            if subgraph_details.address and not subgraph_details.name:
+                                subgraph_details.name = fetch_market_name(
+                                    subgraph_details.address, contract.web3
+                                )
+                            linked_details = subgraph_details
+                            if linked_details.address and not linked_details.name:
+                                linked_details.name = fetch_market_name(
+                                    linked_details.address, contract.web3
+                                )
+                        if not linked_item:
+                            logging.warning(
+                                "Dispute without known item ID (evidenceGroupID=%s)",
+                                evidence_group,
+                            )
+                            continue
+                        message = build_dispute_message(
+                            linked_item, contract.address, linked_details
+                        )
+                    else:
+                        message = build_notification_message(
+                            event.get("event"),
+                            args_dict,
+                            contract.address,
+                            market_address_override=market_details.address,
+                            market_name=market_details.name,
+                        )
                     if message:
                         delivered_chat_id = deliver_notification(
                             settings.telegram_token,

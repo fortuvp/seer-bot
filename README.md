@@ -1,12 +1,13 @@
 # Seer Bot
 
-Telegram watcher for the Gnosis Chain Seer registry (`0x5aAF9E23A11440F8C1Ad6D2E2e5109C7e52CC672`). The script polls confirmed blocks, decodes contract events, and posts curated HTML notifications to Telegram with links back to Seer and Curate.
+Telegram watcher for the Gnosis Chain Seer registry (`0x5aAF9E23A11440F8C1Ad6D2E2e5109C7e52CC672`). It polls confirmed blocks, decodes events, and pushes HTML alerts to Telegram with Seer/Curate deep links and the on-chain market name.
 
 ## Features
-- Monitors the Light Generalized TCR registry on Gnosis via JSON-RPC.
+- Monitors the Light Generalized TCR registry on Gnosis via JSON-RPC and listens for `NewItem`, `RequestSubmitted`, and `Dispute`.
+- For submissions, fetches the `_data` IPFS JSON, extracts the market contract address, calls `marketName()`, and builds Seer + Curate links.
+- For disputes, maps the dispute to the original `itemID` (via tx/evidence group), optionally resolves the market address through a subgraph, fetches `marketName()`, and posts a “challenged” alert with Curate (and Seer when address is known).
 - Waits for configurable confirmations and resumes from the last processed block stored in `state.json`.
-- Deduplicates multi-event transactions so each item submission triggers exactly one Telegram message.
-- Auto-detects Telegram group → supergroup migrations and reuses the new chat id without manual intervention.
+- Deduplicates per transaction so each submission triggers one notification; handles Telegram chat migrations automatically.
 - Emits rich logging with checksummed addresses for easy cross-referencing in explorers.
 
 ## Requirements
@@ -43,6 +44,9 @@ Environment variables are read via `python-dotenv`:
 - `START_BLOCK` – Optional starting block; otherwise the script resumes from `state.json`.
 - `REGISTRY_ADDRESS` – Registry contract to monitor (default points to the Seer registry).
 - `EXPLORER_TX_URL` – Base URL used for transaction links (default GnosisScan).
+- `IPFS_GATEWAY` – Gateway base URL used to fetch IPFS metadata (default `https://ipfs.io`).
+- `IPFS_TIMEOUT` – Timeout in seconds for IPFS HTTP fetches (default `20`).
+- `SUBGRAPH_URL` – GraphQL endpoint (e.g., Envio/Hyperindex) to resolve the market address by itemID when it isn’t available from IPFS
 
 You can override any variable inline when launching, e.g.:
 ```bash
@@ -50,24 +54,26 @@ LOG_LEVEL=DEBUG POLL_INTERVAL=10 python3 bot.py
 ```
 
 ## Running
-Start the watcher with:
-```bash
-python3 bot.py
-```
-Logs stream to stdout. The watcher creates/updates `state.json` with the last processed block so restarts avoid re-sending older events.
-
-Using `just` (requires `just` installed):
-```bash
-just rebuild
-just restart
-```
-
-Defaults: `IMAGE=seer-bot`, `CONTAINER=seer-bot`, `ENV_FILE=.env`.
-
-Override defaults inline, e.g.: `ENV_FILE=/abs/path/to/.env IMAGE=my-image CONTAINER=my-container just rebuild`.
+Run locally:
+1. (Recommended) create and activate a venv:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Configure `.env` (copy from `.env.example`) with `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and any overrides (`SUBGRAPH_URL` is optional for dispute address resolution).
+4. Start the watcher:
+   ```bash
+   python3 bot.py
+   ```
+Logs stream to stdout; `state.json` is updated with the last processed block so restarts don’t replay beyond the confirmation buffer.
 
 ## Operational Notes
-- Notifications are sent only for `NewItem` and `RequestSubmitted` events and include Seer + Curate deep links using the on-chain item ID.
+- Notifications are sent for `NewItem`, `RequestSubmitted`, and `Dispute`. Submissions fetch the `_data` IPFS JSON, derive the market address for the Seer link, and call `marketName()`; Curate always uses the on-chain `itemID`.
+- For disputes, the bot maps the dispute to its `itemID` (via tx/evidence group), optionally uses `SUBGRAPH_URL` to recover the market address if not known, then calls `marketName()`; if the address cannot be resolved, only the Curate link is sent.
 - Transaction hashes are deduplicated in-memory per process; restarting clears the seen set.
 - The script retries automatically if Telegram migrates the chat id during execution.
 - All addresses in logs and messages are rendered in checksum (EIP-55) form for consistency with block explorers.
